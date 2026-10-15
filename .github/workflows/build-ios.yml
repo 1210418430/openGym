@@ -1,8 +1,12 @@
-name: Build unsigned iOS IPA
+name: Build iOS IPA (unsigned + TrollStore fakesigned)
 
 # Ported from upstream's .gitlab-ci.yml `build:ios` job: same mobile bundle,
-# `xcodebuild archive` without a signing identity, an *unsigned* .ipa for
-# AltStore / Sideloadly users who sign it with their own Apple ID.
+# `xcodebuild archive` without a signing identity, then two packages:
+#   - openGym-<ver>-unsigned.ipa    for Sideloadly / AltStore
+#   - openGym-<ver>-fakesigned.ipa  ldid -S with entitlements, for TrollStore
+# TrollStore's docs: "fakesign them with ldid and the entitlements you want
+# (ldid -S) and TrollStore will preserve the entitlements when resigning them
+# with the fake root certificate on installation."
 
 on:
   workflow_dispatch:
@@ -10,6 +14,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/build-ios.yml'
+      - '.github/opengym-entitlements.plist'
 
 permissions:
   contents: write
@@ -44,6 +49,11 @@ jobs:
             brew install cocoapods || sudo gem install cocoapods --no-document
           fi
           pod --version
+          if ! command -v ldid >/dev/null 2>&1; then
+            echo "ldid missing, installing..."
+            brew install ldid
+          fi
+          ldid -v || true
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -69,30 +79,47 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             archive
 
-      - name: Package into .ipa
+      - name: Package both flavours
         working-directory: frontend/ios/App
         run: |
           set -eu
-          # An .ipa is a zip with the .app under Payload/.
-          rm -rf Payload && mkdir Payload
-          cp -R build/App.xcarchive/Products/Applications/App.app Payload/
-          zip -qr "$GITHUB_WORKSPACE/openGym-$IPA_VERSION-unsigned.ipa" Payload
-          cd "$GITHUB_WORKSPACE"
-          shasum -a 256 "openGym-$IPA_VERSION-unsigned.ipa" | tee "openGym-$IPA_VERSION-unsigned.ipa.sha256"
-          ls -lh "openGym-$IPA_VERSION-unsigned.ipa"
-          unzip -l "openGym-$IPA_VERSION-unsigned.ipa" | head -20
+          APP=build/App.xcarchive/Products/Applications/App.app
+          ENT="$GITHUB_WORKSPACE/.github/opengym-entitlements.plist"
+          ls -l "$APP/App"
 
-      - name: Upload IPA as artifact
+          # --- 1) plain unsigned (.ipa = zip with the .app under Payload/) ---
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qr "$GITHUB_WORKSPACE/openGym-$IPA_VERSION-unsigned.ipa" Payload
+
+          # --- 2) fakesign with ldid so TrollStore accepts it ---
+          echo "--- before fakesign ---"
+          codesign -dvvv Payload/App.app/App 2>&1 | head -5 || true
+          for fw in Payload/App.app/Frameworks/*.framework; do
+            [ -d "$fw" ] || continue
+            name="$(basename "$fw" .framework)"
+            if [ -f "$fw/$name" ]; then ldid -S"$ENT" "$fw/$name"; fi
+          done
+          ldid -S"$ENT" Payload/App.app/App
+          echo "--- entitlements after fakesign ---"
+          ldid -e Payload/App.app/App
+          zip -qr "$GITHUB_WORKSPACE/openGym-$IPA_VERSION-fakesigned.ipa" Payload
+
+          cd "$GITHUB_WORKSPACE"
+          shasum -a 256 openGym-*unsigned.ipa openGym-*fakesigned.ipa | tee openGym-sha256.txt
+          ls -lh openGym-*.ipa
+
+      - name: Upload IPAs as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openGym-unsigned-ipa
+          name: openGym-ipa
           path: |
             openGym-*.ipa
-            openGym-*.ipa.sha256
+            openGym-sha256.txt
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish as release asset
+      - name: Publish as release assets
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,6 +127,6 @@ jobs:
           gh release create "ios-$IPA_VERSION-${{ github.run_number }}" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "openGym $IPA_VERSION - unsigned iOS IPA (build ${{ github.run_number }})" \
-            --notes "Unsigned .ipa built from $(git rev-parse --short HEAD). Sign it with your own Apple ID (Sideloadly / AltStore) before installing." \
-            openGym-*.ipa openGym-*.ipa.sha256
+            --title "openGym $IPA_VERSION - iOS IPA (build ${{ github.run_number }})" \
+            --notes "Built from $(git rev-parse --short HEAD). Use *-fakesigned.ipa for TrollStore, *-unsigned.ipa for Sideloadly / AltStore." \
+            openGym-*.ipa openGym-sha256.txt
