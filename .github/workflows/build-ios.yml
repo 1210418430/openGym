@@ -119,6 +119,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # The patched web files on their own (~24 MB of js/css, no exercise media), so the
+      # self-hosted copy of the app can be updated by dropping three files on the server
+      # instead of pulling the whole 210 MB IPA through a slow link. Only files whose
+      # content changed get a new hash, so index.html plus the two new chunks are all the
+      # phone has to fetch.
+      - name: Upload the web bundle on its own
+        uses: actions/upload-artifact@v4
+        with:
+          name: opengym-web-bundle
+          path: |
+            frontend/dist/index.html
+            frontend/dist/assets/*.js
+            frontend/dist/assets/*.css
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Publish as release assets
         continue-on-error: true
         env:
