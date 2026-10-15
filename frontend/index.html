@@ -14,6 +14,54 @@
     document.documentElement.dir = l === 'ar' ? 'rtl' : 'ltr';
   } catch (e) {}
 </script>
+<script>
+  // Boot watchdog. The app can fail before it ever renders — a chunk the engine refuses to
+  // parse (lookbehind on iOS before 16.4 is the classic case), an import that rejects, a
+  // plugin that is missing — and on a phone all of those look identical: a black screen with
+  // no way to tell what happened. This turns that into text on the screen, and that is the
+  // whole reason it is here: the one device that matters has no console attached.
+  // It stays silent — no output, no layout, no timers left behind — once the app is up.
+  (function () {
+    var start = Date.now();
+    var problems = [];
+    window.addEventListener('error', function (e) {
+      var t = e.target;
+      if (t && t !== window && t.tagName) {
+        problems.push('resource failed: <' + t.tagName.toLowerCase() + '> ' + String(t.src || t.href || '').split('/').pop());
+      } else {
+        problems.push('error: ' + (e.message || '(none)') + ' @ ' + String(e.filename || '').split('/').pop() + ':' + e.lineno);
+      }
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason;
+      problems.push('rejection: ' + ((r && (r.message || r)) || '(empty)'));
+    });
+    var tick = setInterval(function () {
+      var root = document.getElementById('root');
+      var len = root ? root.innerHTML.length : 0;
+      // The loading icon is a few hundred characters of markup and the first real screen is
+      // thousands, so anything under 700 after 20s means the app never got going.
+      if (len > 700) { clearInterval(tick); return; }
+      if (Date.now() - start < 20000) return;
+      clearInterval(tick);
+      var res = [];
+      try {
+        res = performance.getEntriesByType('resource').map(function (r) { return r.name.split('/').pop(); });
+      } catch (e) {}
+      var panel = document.createElement('div');
+      panel.setAttribute('style', 'position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#7f1d1d;color:#fff;font:12px/1.45 ui-monospace,Menlo,monospace;padding:10px;white-space:pre-wrap;max-height:70vh;overflow:auto');
+      panel.textContent =
+        'openGym 没有启动（请截图这一屏）\n' +
+        '#root=' + len + 'ch  readyState=' + document.readyState + '  capacitor=' + (window.Capacitor ? 'yes' : 'no') + '\n' +
+        'href: ' + location.href + '\n' +
+        'loaded(' + res.length + '): ' + res.slice(0, 16).join(' ') + '\n' +
+        (problems.length
+          ? 'problems:\n' + problems.slice(0, 12).join('\n')
+          : 'no JS error was reported — the engine refused a script before it could run');
+      (document.body || document.documentElement).appendChild(panel);
+    }, 700);
+  })();
+</script>
 <title>openGym</title>
 <meta name="description" content="Personal gym & body weight tracker">
 <meta name="theme-color" content="#0c0e12">
