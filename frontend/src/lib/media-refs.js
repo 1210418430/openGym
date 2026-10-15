@@ -202,7 +202,12 @@ export function cleanUrl(raw) {
   return u.href.length <= MAX_URL ? u.href : null
 }
 
-const LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/i
+// A DNS label: 1-63 characters, letters/digits/hyphen, no hyphen at either end.
+// Deliberately free of lookbehind: JavaScriptCore before iOS 16.4 rejects the entire
+// module at parse time over a single lookbehind assertion, and this module is a boot-time
+// dependency of the app, so one lookbehind here is a black screen on iOS 15 / 16.0-16.3
+// that no reload can fix.
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i
 function plausibleHost(host) {
   if (host.startsWith('[') && host.endsWith(']')) return true               // IPv6
   const h = host.replace(/\.$/, '').toLowerCase()
