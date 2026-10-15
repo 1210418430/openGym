@@ -1,0 +1,105 @@
+name: Build unsigned iOS IPA
+
+# Ported from upstream's .gitlab-ci.yml `build:ios` job: same mobile bundle,
+# `xcodebuild archive` without a signing identity, an *unsigned* .ipa for
+# AltStore / Sideloadly users who sign it with their own Apple ID.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ios.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Toolchain versions
+        run: |
+          set -eu
+          xcodebuild -version
+          node -v
+          npm -v
+          if ! command -v pod >/dev/null 2>&1; then
+            echo "CocoaPods missing, installing..."
+            brew install cocoapods || sudo gem install cocoapods --no-document
+          fi
+          pod --version
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build mobile web bundle and sync native projects
+        working-directory: frontend
+        run: npm run build:mobile
+
+      - name: Archive (unsigned)
+        working-directory: frontend/ios/App
+        run: |
+          set -eu
+          VER="$(node -p "require('../../package.json').version")"
+          BUILD="$(sed -n 's/^ *versionCode \([0-9]*\).*/\1/p' ../../android/app/build.gradle | sed -n 1p)"
+          [ -n "$BUILD" ] || { echo "could not read versionCode from android/app/build.gradle" >&2; exit 1; }
+          echo "IPA_VERSION=$VER" >> "$GITHUB_ENV"
+          echo "version=$VER build=$BUILD"
+          xcodebuild -workspace App.xcworkspace -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/App.xcarchive" \
+            MARKETING_VERSION="$VER" CURRENT_PROJECT_VERSION="$BUILD" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            archive
+
+      - name: Package into .ipa
+        working-directory: frontend/ios/App
+        run: |
+          set -eu
+          # An .ipa is a zip with the .app under Payload/.
+          rm -rf Payload && mkdir Payload
+          cp -R build/App.xcarchive/Products/Applications/App.app Payload/
+          zip -qr "$GITHUB_WORKSPACE/openGym-$IPA_VERSION-unsigned.ipa" Payload
+          cd "$GITHUB_WORKSPACE"
+          shasum -a 256 "openGym-$IPA_VERSION-unsigned.ipa" | tee "openGym-$IPA_VERSION-unsigned.ipa.sha256"
+          ls -lh "openGym-$IPA_VERSION-unsigned.ipa"
+          unzip -l "openGym-$IPA_VERSION-unsigned.ipa" | head -20
+
+      - name: Upload IPA as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openGym-unsigned-ipa
+          path: |
+            openGym-*.ipa
+            openGym-*.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish as release asset
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "ios-$IPA_VERSION-${{ github.run_number }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "openGym $IPA_VERSION - unsigned iOS IPA (build ${{ github.run_number }})" \
+            --notes "Unsigned .ipa built from $(git rev-parse --short HEAD). Sign it with your own Apple ID (Sideloadly / AltStore) before installing." \
+            openGym-*.ipa openGym-*.ipa.sha256
